@@ -142,3 +142,35 @@ class Flappy:
             self.config.tick()
             pygame.display.update()
             await asyncio.sleep(0)
+
+    async def play_single_frame(self):
+        """Execute a single frame of the game for RL training"""
+        # Check if game is over
+        if self.player.collided(self.pipes, self.floor):
+            return False
+            
+        # Check coin collection
+        for coin in self.coins.coins[:]:
+            if self.player.collide(coin):
+                self.score.add_coins(1)
+                self.coins.coins.remove(coin)
+                
+        # Check pipe crossing
+        for pipe in self.pipes.upper:
+            if self.player.crossed(pipe):
+                self.score.add()
+                
+        # Update game state
+        self.background.tick()
+        self.floor.tick()
+        self.pipes.tick()
+        self.score.tick()
+        self.coins.tick(self.pipes)
+        self.player.tick()
+        
+        # Update display
+        pygame.display.update()
+        await asyncio.sleep(0)
+        self.config.tick()
+        
+        return not self.player.crashed
