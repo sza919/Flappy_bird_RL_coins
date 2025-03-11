@@ -27,13 +27,14 @@ class AutoPlayer:
         nearest_coin = None
         min_coin_distance = float('inf')
         for coin in coins.coins:
-            distance = ((coin.x - player.x)**2 + (coin.y - player.y)**2)**0.5
+            distance = coin.x - player.x
             if distance < min_coin_distance:
                 min_coin_distance = distance
                 nearest_coin = coin
 
         if nearest_pipe or nearest_coin:
             return {
+                'height': player.y,
                 'px': nearest_pipe.x - player.x if nearest_pipe else 1000,
                 'py': nearest_pipe.y - player.y if nearest_pipe else 0,
                 'cx': nearest_coin.x - player.x if nearest_coin else 1000,
