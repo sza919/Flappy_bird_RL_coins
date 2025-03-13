@@ -7,13 +7,41 @@ from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerM
 
 class AutoPlayer:
     def __init__(self):
-        self.flap_probability = 0.04
-        self.history = []
+        self.base_flap_probability = 0.0015
+        self.history = None
+        
 
-    def should_flap(self):
-        return random.random() < self.flap_probability
+    def should_flap(self, player, pipes, coins, game):
+        state = self.get_state(player, pipes, coins, game)
 
-    def get_state(self, player, pipes, coins):
+        if not state:
+            return False
+
+        # Calculate flap probability based on state
+        prob = self.base_flap_probability
+
+        # Increase probability if bird is falling too fast
+        if state['vy'] > 5:
+            prob += 0.1
+        
+        # Increase probability if bird is too low and falling
+        if state['height'] > 300 and state['vy'] > 0:
+            prob += 0.2
+            
+        # Increase probability if bird is approaching a pipe and needs to go up
+        if state['px'] < 200 and state['py'] < -50:
+            prob += 0.15
+            
+        # Increase probability if there's a coin above the bird
+        if abs(state['cx']) < 200 and state['cy'] < -20:
+            prob += 0.1
+
+        # Cap probability at 0.95
+        prob = min(prob, 0.95)
+        
+        return random.random() < prob
+
+    def get_state(self, player, pipes, coins, score):
         # Get nearest pipe
         nearest_pipe = None
         min_distance = float('inf')
@@ -36,10 +64,12 @@ class AutoPlayer:
             return {
                 'height': player.y,
                 'px': nearest_pipe.x - player.x if nearest_pipe else 1000,
-                'py': nearest_pipe.y - player.y if nearest_pipe else 0,
+                'py': nearest_pipe.y - player.y + 380 if nearest_pipe else 0,
                 'cx': nearest_coin.x - player.x if nearest_coin else 1000,
                 'cy': nearest_coin.y - player.y if nearest_coin else 0,
                 'vy': player.vel_y,
+                'score': score.score,  # Add score to state
+                'coins': score.coins_collected,
                 'state': 'alive'
             }
         return None
@@ -75,18 +105,20 @@ async def auto_play():
                     return
 
             # Record current state
-            current_state = player.get_state(game.player, game.pipes, game.coins)
+            current_state = player.get_state(game.player, game.pipes, game.coins, game.score)
+            should_flap = player.should_flap(game.player, game.pipes, game.coins, game.score)
             if current_state:
+                current_state['flapped'] = should_flap
                 episode_states.append(current_state)
 
             if game.player.collided(game.pipes, game.floor):
                 # Record terminal state
                 episode_states.append({'state': 'dead'})
-                player.history.append(episode_states)
+                player.history = episode_states
                 break
 
                        # Auto flap with probability
-            if player.should_flap():
+            if should_flap:
                 game.player.flap()
 
             # Check coins
