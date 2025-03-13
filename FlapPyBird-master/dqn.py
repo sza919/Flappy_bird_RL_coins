@@ -65,6 +65,7 @@ class DQNAgent:
         
         # Training stats
         self.episode_rewards = []
+        self.episode_scores = []  # Track scores for each episode
         self.total_episodes = 0
         self.previous_state = None
         self.previous_action = None
@@ -196,6 +197,7 @@ class DQNAgent:
             'optimizer': self.optimizer.state_dict(),
             'episodes': self.total_episodes,
             'rewards': self.episode_rewards,
+            'scores': self.episode_scores,  # Also save scores history
             'epsilon': self.epsilon
         }, 'dqn_model.pth')
         
@@ -207,6 +209,7 @@ class DQNAgent:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.total_episodes = checkpoint['episodes']
             self.episode_rewards = checkpoint['rewards']
+            self.episode_scores = checkpoint.get('scores', [])  # Handle case where old model doesn't have scores
             self.epsilon = checkpoint['epsilon']
             print(f"Loaded DQN model after {self.total_episodes} episodes")
             return True
@@ -277,7 +280,7 @@ async def train_dqn_agent(display=False):
                     agent.memory.add(
                         agent.previous_state,
                         agent.previous_action,
-                        -10,  # Fixed negative reward for dying
+                        -100,  # Fixed negative reward for dying
                         agent.previous_state,  # Use previous state as terminal state doesn't matter
                         True  # Done flag
                     )
@@ -320,7 +323,7 @@ async def train_dqn_agent(display=False):
                 
                 # Small reward for staying alive
                 if reward == 0:
-                    reward += 0.1
+                    reward += 0.2
                     
                     # Add small additional reward for good positioning
                     if agent.previous_state is not None:
@@ -373,6 +376,7 @@ async def train_dqn_agent(display=False):
         # Episode finished
         agent.total_episodes += 1
         agent.episode_rewards.append(episode_reward)
+        agent.episode_scores.append(game.score.score)  # Store final score
         
         # Update exploration rate
         agent.update_exploration_rate()
@@ -384,7 +388,14 @@ async def train_dqn_agent(display=False):
         # Display progress and save model
         if agent.total_episodes % 10 == 0:
             avg_reward = sum(agent.episode_rewards[-10:]) / 10
-            print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}, Memory: {len(agent.memory)}")
+            
+            # Display scores from last 10 episodes
+            recent_scores = agent.episode_scores[-10:]
+            scores_str = ", ".join([f"{score}" for score in recent_scores])
+            print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}")
+            print(f"Last 10 scores: [{scores_str}], Avg Score: {sum(recent_scores)/len(recent_scores):.1f}")
+            print(f"Memory size: {len(agent.memory)}")
+            
             agent.save_model()  # Save progress periodically
         
         # Minimal delay between episodes (but still allow some breathing room for system)
