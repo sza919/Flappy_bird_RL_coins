@@ -1,6 +1,6 @@
 import asyncio
 import sys
-
+import os
 import pygame
 from pygame.locals import K_ESCAPE, K_SPACE, K_UP, KEYDOWN, QUIT
 
@@ -19,13 +19,17 @@ from .utils import GameConfig, Images, Sounds, Window
 
 
 class Flappy:
-    def __init__(self):
+    def __init__(self, headless=False):
+        if headless:
+            os.environ['SDL_VIDEODRIVER'] = 'dummy'
+        
         pygame.init()
         pygame.display.set_caption("Flappy Bird")
         window = Window(288, 512)
+        
+        # Only set up the display once
         screen = pygame.display.set_mode((window.width, window.height))
         images = Images()
-
         self.config = GameConfig(
             screen=screen,
             clock=pygame.time.Clock(),

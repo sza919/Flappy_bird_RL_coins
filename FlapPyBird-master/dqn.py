@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from collections import deque
+import os
 from src.flappy import Flappy
 from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerMode
 
@@ -45,10 +46,10 @@ class DQNAgent:
         
         # Hyperparameters
         self.learning_rate = 0.001
-        self.gamma = 0.99  # Discount factor
+        self.gamma = 0.99999  # Discount factor
         self.epsilon = 0.1  # Exploration rate
         self.epsilon_decay = 0.995
-        self.epsilon_min = 0.01
+        self.epsilon_min = 0
         self.batch_size = 64
         self.target_update = 10  # Update target network every N episodes
         
@@ -154,12 +155,12 @@ class DQNAgent:
         # Convert batch of transitions to separate arrays
         states, actions, rewards, next_states, dones = zip(*transitions)
         
-        # Convert to tensors
-        states = torch.FloatTensor(states)
-        actions = torch.LongTensor(actions).unsqueeze(1)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1)
-        next_states = torch.FloatTensor(next_states) 
-        dones = torch.FloatTensor(dones).unsqueeze(1)
+        # Convert to numpy arrays first, then to tensors (much faster)
+        states = torch.FloatTensor(np.array(states))
+        actions = torch.LongTensor(np.array(actions)).unsqueeze(1)
+        rewards = torch.FloatTensor(np.array(rewards)).unsqueeze(1)
+        next_states = torch.FloatTensor(np.array(next_states))
+        dones = torch.FloatTensor(np.array(dones)).unsqueeze(1)
         
         # Compute current Q values
         current_q_values = self.policy_net(states).gather(1, actions)
@@ -213,12 +214,27 @@ class DQNAgent:
             print("No valid DQN model found, starting fresh")
             return False
 
-async def train_dqn_agent():
-    game = Flappy()
+# Add this function to GameConfig class by monkey patching
+def tick_no_delay(self):
+    """Tick without enforcing FPS limit"""
+    self.clock.tick()  # Just update the clock without delay
+
+async def train_dqn_agent(display=False):
+    # Initialize game without display
+    if not display:
+        os.environ['SDL_VIDEODRIVER'] = 'dummy'  # Set dummy video driver
+    
+    game = Flappy(headless=not display)  # Assuming Flappy class accepts a headless parameter
     agent = DQNAgent()
+    agent.display = display
     agent.load_model()  # Try to load existing model
     
-    print("Starting DQN training...")
+    print("Starting DQN training in headless mode...")
+    
+    # Disable FPS limit to maximize training speed
+    if not display:
+        game.config.fps = 0  # Set to zero to remove FPS cap
+        game.config.tick_no_delay = tick_no_delay.__get__(game.config, type(game.config))
     
     while True:
         # Initialize game components
@@ -237,11 +253,12 @@ async def train_dqn_agent():
         episode_reward = 0
         agent.previous_state = None
         agent.previous_action = None
-        agent.previous_score = 0  # Reset score tracking at episode start
+        agent.previous_score = 0
         episode_steps = 0
         
         # Main game loop
         while True:
+            # Check for quit events but skip rendering-related events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     agent.save_model()
@@ -311,7 +328,7 @@ async def train_dqn_agent():
                         pipe_x = agent.previous_state[2] * 288  # Denormalize pipe_x
                         
                         # Encourage bird to stay at middle level of the pipe
-                        vertical_alignment = -abs(pipe_y)/512  # Higher when close to pipe center
+                        vertical_alignment = 0.2-abs(pipe_y)/512  # Higher when close to pipe center
                         
                         # Encourage progress toward pipe but with less weight
                         proximity_reward = -pipe_x/288 * 0.5
@@ -342,10 +359,16 @@ async def train_dqn_agent():
                 if len(agent.memory) > agent.batch_size:
                     agent.learn_from_experiences()
                 
-            pygame.display.update()
-            await asyncio.sleep(0)
-            game.config.tick()
+            # Skip display update and use no delay for tick
+            if not display:
+                game.config.tick_no_delay()
+            else:
+                pygame.display.update()
+                await asyncio.sleep(0)
+                game.config.tick()
             episode_steps += 1
+            
+            # No sleep to maximize training speed - completely removed
         
         # Episode finished
         agent.total_episodes += 1
@@ -363,8 +386,17 @@ async def train_dqn_agent():
             avg_reward = sum(agent.episode_rewards[-10:]) / 10
             print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}, Memory: {len(agent.memory)}")
             agent.save_model()  # Save progress periodically
-            
-        await asyncio.sleep(0.5)  # Small delay between episodes
+        
+        # Minimal delay between episodes (but still allow some breathing room for system)
+        if not display:
+            await asyncio.sleep(0.001)
+        else:
+            await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    asyncio.run(train_dqn_agent())
+    import argparse
+    parser = argparse.ArgumentParser(description='Train Flappy Bird with DQN')
+    parser.add_argument('--display', action='store_true', help='Enable display mode')
+    args = parser.parse_args()
+    
+    asyncio.run(train_dqn_agent(display=args.display))
