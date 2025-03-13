@@ -15,15 +15,13 @@ from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerM
 class DQN(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, output_size)
+        self.fc1 = nn.Linear(input_size, 32)
+        self.fc2 = nn.Linear(32, output_size)
         
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        # No activation on output layer for unbounded Q-values
-        return self.fc3(x)
+        return x
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -44,11 +42,11 @@ class DQNAgent:
         self.action_dim = 2  # [no flap, flap]
         
         # Hyperparameters
-        self.learning_rate = 0.001
-        self.gamma = 0.99  # Discount factor
-        self.epsilon = 0.1  # Exploration rate
-        self.epsilon_decay = 0.995
-        self.epsilon_min = 0.01
+        self.learning_rate = 0.05
+        self.gamma = 1  # Discount factor
+        self.epsilon = 0.03 # Exploration rate
+        self.epsilon_decay = 0.9995
+        self.epsilon_min = 0.00001
         self.batch_size = 64
         self.target_update = 10  # Update target network every N episodes
         
@@ -56,7 +54,6 @@ class DQNAgent:
         self.policy_net = DQN(self.state_dim, self.action_dim)
         self.target_net = DQN(self.state_dim, self.action_dim)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval()  # Set target network to evaluation mode
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
         
         # Replay memory
@@ -143,41 +140,28 @@ class DQNAgent:
         
         return action == 1  # Return True if action is flap (1)
     
-    def learn_from_experiences(self):
+    def learn_online(self,state,action,reward,next_state,done):
         # Check if we have enough samples in memory
-        if len(self.memory) < self.batch_size:
-            return
-        
-        # Sample a batch of experiences
-        transitions = self.memory.sample(self.batch_size)
-        
-        # Convert batch of transitions to separate arrays
-        states, actions, rewards, next_states, dones = zip(*transitions)
-        
-        # Convert to tensors
-        states = torch.FloatTensor(states)
-        actions = torch.LongTensor(actions).unsqueeze(1)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1)
-        next_states = torch.FloatTensor(next_states) 
-        dones = torch.FloatTensor(dones).unsqueeze(1)
-        
-        # Compute current Q values
-        current_q_values = self.policy_net(states).gather(1, actions)
-        
-        # Compute next Q values (using target network)
-        with torch.no_grad():
-            next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
-        
-        # Compute target Q values
-        target_q_values = rewards + self.gamma * next_q_values * (1 - dones)
-        
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0)
+        action_tensor = torch.LongTensor([action]).unsqueeze(0)
+        reward_tensor = torch.FloatTensor([reward]).unsqueeze(0)
+        done_tensor = torch.FloatTensor([done]).unsqueeze(0)
+
+        # Compute current Q value
+        current_q = self.policy_net(state_tensor).gather(1, action_tensor)
+
+        # Compute next Q value (using target network)
+        next_q = self.target_net(next_state_tensor).max(1)[0].unsqueeze(1).detach()
+        expected_q = reward_tensor + self.gamma * next_q * (1 - done_tensor)
+
         # Compute loss
-        loss = F.smooth_l1_loss(current_q_values, target_q_values)
-        
+        loss = F.smooth_l1_loss(current_q, expected_q)
+
         # Optimize the model
         self.optimizer.zero_grad()
         loss.backward()
-        # Clip gradients to stabilize training
+        # Clip gradients (optional)
         for param in self.policy_net.parameters():
             param.grad.data.clamp_(-1, 1)
         self.optimizer.step()
@@ -254,16 +238,36 @@ async def train_dqn_agent():
             # Check if game is over
             game_over = game.player.collided(game.pipes, game.floor)
             
+            # if game_over:
+            #     if agent.previous_state is not None:
+            #         # Add terminal transition to memory
+            #         agent.memory.add(
+            #             agent.previous_state, 
+            #             agent.previous_action, 
+            #             -100,  # Big negative reward for dying
+            #             agent.previous_state,  # Use previous state as terminal state doesn't matter
+            #             True  # Done flag
+            #         )
+            #     break
             if game_over:
                 if agent.previous_state is not None:
-                    # Add terminal transition to memory with negative reward
+                    # Calculate distance to the nearest pipe
+                    # Extract pipe distance and height from previous state
+                    pipe_y = agent.previous_state[3] * 512.0  # Denormalize pipe_y
+                    # this is distance!!!
+                    # Add a reward if the bird was close to passing the pipe
+                
+                    close_to_passing_loss = abs(pipe_y)
+
+                    # Add terminal transition to memory
                     agent.memory.add(
                         agent.previous_state,
                         agent.previous_action,
-                        -10,  # Fixed negative reward for dying
+                        -100*close_to_passing_loss,  # Adjusted reward
                         agent.previous_state,  # Use previous state as terminal state doesn't matter
                         True  # Done flag
                     )
+                    
                 break
                 
             # If we have a valid state
@@ -297,27 +301,24 @@ async def train_dqn_agent():
                 # Get next state
                 next_state_dict = agent.get_state(game.player, game.pipes, game.coins, game.score)
                 
-                # Calculate reward
+                # Calculate reward based on score difference
                 current_score = game.score.score
                 reward = current_score - agent.previous_score
                 
-                # Small reward for staying alive
+                # Add small positive reward for staying alive
                 if reward == 0:
-                    reward += 0.1
+                    pipe_y = agent.previous_state[3]*512  #normalized_distance
+                    pipe_x = agent.previous_state[2]
+                    height = agent.previous_state[0]*512 #unnormalized height
                     
-                    # Add small additional reward for good positioning
-                    if agent.previous_state is not None:
-                        pipe_y = agent.previous_state[3] * 512  # Denormalize pipe_y
-                        pipe_x = agent.previous_state[2] * 288  # Denormalize pipe_x
-                        
-                        # Encourage bird to stay at middle level of the pipe
-                        vertical_alignment = -abs(pipe_y)/512  # Higher when close to pipe center
-                        
-                        # Encourage progress toward pipe but with less weight
-                        proximity_reward = -pipe_x/288 * 0.5
-                        
-                        reward += vertical_alignment + proximity_reward
+                    # Add a reward if the bird was close to passing the pipe
                 
+                    vertical_distance = abs(pipe_y)
+                    # Reward is inversely proportional to the vertical distance
+                    close_to_passing_loss = vertical_distance
+                    
+                    reward +=   -abs(pipe_y)/512  - pipe_x # More reward the closer it is
+                    
                 # Update previous score for next iteration
                 agent.previous_score = current_score
                 
@@ -338,9 +339,8 @@ async def train_dqn_agent():
                             False  # Not done yet
                         )
                 
-                # Learn from past experiences (batch learning)
-                if len(agent.memory) > agent.batch_size:
-                    agent.learn_from_experiences()
+                # Learn from past experiences
+                agent.learn_online(current_state,should_flap,reward,next_state,False)
                 
             pygame.display.update()
             await asyncio.sleep(0)

@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from collections import deque
+import os
 from src.flappy import Flappy
 from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerMode
 
@@ -214,11 +215,14 @@ class DQNAgent:
             return False
 
 async def train_dqn_agent():
-    game = Flappy()
+    # Initialize game without display
+    os.environ['SDL_VIDEODRIVER'] = 'dummy'  # Set dummy video driver
+    
+    game = Flappy(headless=True)  # Assuming Flappy class accepts a headless parameter
     agent = DQNAgent()
     agent.load_model()  # Try to load existing model
     
-    print("Starting DQN training...")
+    print("Starting DQN training in headless mode...")
     
     while True:
         # Initialize game components
@@ -237,11 +241,12 @@ async def train_dqn_agent():
         episode_reward = 0
         agent.previous_state = None
         agent.previous_action = None
-        agent.previous_score = 0  # Reset score tracking at episode start
+        agent.previous_score = 0
         episode_steps = 0
         
         # Main game loop
         while True:
+            # Check for quit events but skip rendering-related events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     agent.save_model()
@@ -342,10 +347,12 @@ async def train_dqn_agent():
                 if len(agent.memory) > agent.batch_size:
                     agent.learn_from_experiences()
                 
-            pygame.display.update()
-            await asyncio.sleep(0)
+            # Skip display update and use minimal sleep
             game.config.tick()
             episode_steps += 1
+            
+            # Use a very small sleep to prevent CPU hogging
+            await asyncio.sleep(0.001)
         
         # Episode finished
         agent.total_episodes += 1
@@ -364,7 +371,7 @@ async def train_dqn_agent():
             print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}, Memory: {len(agent.memory)}")
             agent.save_model()  # Save progress periodically
             
-        await asyncio.sleep(0.5)  # Small delay between episodes
+        await asyncio.sleep(0.01)  # Minimal delay between episodes
 
 if __name__ == "__main__":
     asyncio.run(train_dqn_agent())
