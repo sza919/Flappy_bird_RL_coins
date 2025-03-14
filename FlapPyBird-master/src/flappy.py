@@ -3,7 +3,8 @@ import sys
 import os
 import pygame
 from pygame.locals import K_ESCAPE, K_SPACE, K_UP, KEYDOWN, QUIT
-
+import random
+import time
 from .entities import (
     Background,
     Coins,
@@ -22,7 +23,6 @@ class Flappy:
     def __init__(self, headless=False):
         if headless:
             os.environ['SDL_VIDEODRIVER'] = 'dummy'
-        
         pygame.init()
         pygame.display.set_caption("Flappy Bird")
         window = Window(288, 512)

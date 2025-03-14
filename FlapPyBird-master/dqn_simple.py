@@ -1,13 +1,13 @@
 import asyncio
 import random
 import pygame
-import json
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from collections import deque
+import os
 from src.flappy import Flappy
 from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerMode
 
@@ -15,43 +15,69 @@ from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerM
 class DQN(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, output_size)
+        self.fc1 = nn.Linear(input_size, 128)
+        self.fc2 = nn.Linear(128, output_size)
         
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
         # No activation on output layer for unbounded Q-values
-        return self.fc3(x)
+        return self.fc2(x)
 
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
+        self.best_trajectory = []
+        self.best_reward = -float('inf')  # Initialize with negative infinity
     
     def add(self, state, action, reward, next_state, done):
         self.buffer.append((state, action, reward, next_state, done))
     
+    def add_trajectory(self, trajectory, reward):
+        """Store a full trajectory if it has the highest reward seen so far"""
+        if reward > self.best_reward:
+            self.best_reward = reward
+            self.best_trajectory = trajectory.copy()
+            #print(f"New best trajectory saved with reward: {reward}")
+    
     def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
+        # If we don't have enough samples in the buffer, return what we have
+        if len(self.buffer) < batch_size:
+            return list(self.buffer)
+            
+        # Include experiences from best trajectory if available
+        if self.best_trajectory:
+            # Calculate how many samples to take from regular buffer vs best trajectory
+            best_samples = min(batch_size // 4, len(self.best_trajectory))
+            regular_samples = min(batch_size - best_samples, len(self.buffer))
+            
+            # Sample from regular buffer
+            regular_experiences = random.sample(list(self.buffer), regular_samples) if regular_samples > 0 else []
+            
+            # Sample from best trajectory
+            best_experiences = random.sample(self.best_trajectory, best_samples) if best_samples > 0 else []
+            
+            # Combine samples
+            return regular_experiences + best_experiences
+        else:
+            return random.sample(list(self.buffer), batch_size)
     
     def __len__(self):
         return len(self.buffer)
 
 class DQNAgent:
     def __init__(self):
-        self.state_dim = 6  # [y_pos, y_vel, pipe_x, pipe_y, coin_x, coin_y]
+        self.state_dim = 3  # [vy, px, py]
         self.action_dim = 2  # [no flap, flap]
         
         # Hyperparameters
         self.learning_rate = 0.001
-        self.gamma = 0.9999  # Discount factor
+        self.gamma = 0.99  # Discount factor
         self.epsilon = 0.1  # Exploration rate
         self.epsilon_decay = 0.995
-        self.epsilon_min = 0.01
-        self.batch_size = 64
+        self.epsilon_min = 0
+        self.batch_size = 256   
         self.target_update = 10  # Update target network every N episodes
-        
+
         # Neural Networks
         self.policy_net = DQN(self.state_dim, self.action_dim)
         self.target_net = DQN(self.state_dim, self.action_dim)
@@ -64,6 +90,7 @@ class DQNAgent:
         
         # Training stats
         self.episode_rewards = []
+        self.episode_scores = []  # Track scores for each episode
         self.total_episodes = 0
         self.previous_state = None
         self.previous_action = None
@@ -72,15 +99,13 @@ class DQNAgent:
     def normalize_state(self, state_dict):
         """Normalize the state values for neural network input"""
         # Extract values from state dictionary
-        height = state_dict['height'] / 512.0  # Normalize by screen height
+        
         vel_y = state_dict['vy'] / 10.0  # Normalize velocity
         pipe_x = min(state_dict['px'], 288) / 288.0  # Normalize by screen width
         pipe_y = state_dict['py'] / 512.0  # Normalize by screen height
-        coin_x = min(state_dict['cx'], 288) / 288.0  # Normalize by screen width
-        coin_y = state_dict['cy'] / 512.0  # Normalize by screen height
         
         # Return normalized values as a numpy array
-        return np.array([height, vel_y, pipe_x, pipe_y, coin_x, coin_y], dtype=np.float32)
+        return np.array([vel_y, pipe_x, pipe_y], dtype=np.float32)
     
     def get_state(self, player, pipes, coins, score):
         # Get nearest pipe
@@ -172,7 +197,7 @@ class DQNAgent:
         target_q_values = rewards + self.gamma * next_q_values * (1 - dones)
         
         # Compute loss
-        loss = F.smooth_l1_loss(current_q_values, target_q_values)
+        loss = F.mse_loss(current_q_values, target_q_values)
         
         # Optimize the model
         self.optimizer.zero_grad()
@@ -195,6 +220,7 @@ class DQNAgent:
             'optimizer': self.optimizer.state_dict(),
             'episodes': self.total_episodes,
             'rewards': self.episode_rewards,
+            'scores': self.episode_scores,  # Also save scores history
             'epsilon': self.epsilon
         }, 'dqn_model.pth')
         
@@ -206,6 +232,7 @@ class DQNAgent:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.total_episodes = checkpoint['episodes']
             self.episode_rewards = checkpoint['rewards']
+            self.episode_scores = checkpoint.get('scores', [])  # Handle case where old model doesn't have scores
             self.epsilon = checkpoint['epsilon']
             print(f"Loaded DQN model after {self.total_episodes} episodes")
             return True
@@ -213,12 +240,27 @@ class DQNAgent:
             print("No valid DQN model found, starting fresh")
             return False
 
-async def train_dqn_agent():
-    game = Flappy()
+# Add this function to GameConfig class by monkey patching
+def tick_no_delay(self):
+    """Tick without enforcing FPS limit"""
+    self.clock.tick()  # Just update the clock without delay
+
+async def train_dqn_agent(display=False):
+    # Initialize game without display
+    if not display:
+        os.environ['SDL_VIDEODRIVER'] = 'dummy'  # Set dummy video driver
+    
+    game = Flappy(headless=not display)  # Assuming Flappy class accepts a headless parameter
     agent = DQNAgent()
+    agent.display = display
     agent.load_model()  # Try to load existing model
     
-    print("Starting DQN training...")
+    print("Starting DQN training in headless mode...")
+    
+    # Disable FPS limit to maximize training speed
+    if not display:
+        game.config.fps = 0  # Set to zero to remove FPS cap
+        game.config.tick_no_delay = tick_no_delay.__get__(game.config, type(game.config))
     
     while True:
         # Initialize game components
@@ -237,11 +279,13 @@ async def train_dqn_agent():
         episode_reward = 0
         agent.previous_state = None
         agent.previous_action = None
-        agent.previous_score = 0  # Reset score tracking at episode start
+        agent.previous_score = 0
         episode_steps = 0
+        episode_trajectory = []  # Store all transitions for this episode
         
         # Main game loop
         while True:
+            # Check for quit events but skip rendering-related events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     agent.save_model()
@@ -255,21 +299,31 @@ async def train_dqn_agent():
             game_over = game.player.collided(game.pipes, game.floor)
             
             if game_over:
+                terminal_reward = -10
+                # Add small additional reward for good positioning
                 if agent.previous_state is not None:
+                    pipe_y = agent.previous_state[1] * 512  # Denormalize pipe_y
+                    # Encourage bird to stay at middle level of the pipe
+                    vertical_alignment = -abs(pipe_y)/512  # Higher when close to pipe center
+                    
+                    terminal_reward += 10*vertical_alignment 
+                if agent.previous_state is not None and current_state_dict:
                     # Add terminal transition to memory with negative reward
-                    agent.memory.add(
+                    current_state = agent.normalize_state(current_state_dict)
+                    terminal_transition = (
                         agent.previous_state,
                         agent.previous_action,
-                        -10,  # Fixed negative reward for dying
-                        agent.previous_state,  # Use previous state as terminal state doesn't matter
+                        terminal_reward,  # Fixed negative reward for dying
+                        current_state,  # Use current state as the terminal state
                         True  # Done flag
                     )
+                    agent.memory.add(*terminal_transition)
+                    episode_trajectory.append(terminal_transition)
+                    episode_reward += terminal_reward
                 break
                 
             # If we have a valid state
             if current_state_dict:
-                current_state = agent.normalize_state(current_state_dict)
-                
                 # Choose and perform action
                 should_flap = agent.should_flap(game.player, game.pipes, game.coins, game.score)
                 if should_flap:
@@ -303,21 +357,12 @@ async def train_dqn_agent():
                 
                 # Small reward for staying alive
                 if reward == 0:
-                    reward += 0.1
-                    
                     # Add small additional reward for good positioning
-                    if agent.previous_state is not None:
-                        pipe_y = agent.previous_state[3] * 512  # Denormalize pipe_y
-                        pipe_x = agent.previous_state[2] * 288  # Denormalize pipe_x
+                    reward += 0.03
+                    if should_flap:
+                        reward -= 0.3
+                        # can be removed
                         
-                        # Encourage bird to stay at middle level of the pipe
-                        vertical_alignment = 0.2-abs(pipe_y)/512  # Higher when close to pipe center
-                        
-                        # Encourage progress toward pipe but with less weight
-                        proximity_reward = -pipe_x/288 * 0.2
-                        
-                        reward += vertical_alignment + proximity_reward
-                
                 # Update previous score for next iteration
                 agent.previous_score = current_score
                 
@@ -330,26 +375,38 @@ async def train_dqn_agent():
                     
                     # Only add to memory if we have valid previous state
                     if agent.previous_state is not None:
-                        agent.memory.add(
+                        transition = (
                             agent.previous_state,
                             agent.previous_action,
                             reward,
                             next_state,
                             False  # Not done yet
                         )
+                        agent.memory.add(*transition)
+                        episode_trajectory.append(transition)
                 
                 # Learn from past experiences (batch learning)
                 if len(agent.memory) > agent.batch_size:
                     agent.learn_from_experiences()
                 
-            pygame.display.update()
-            await asyncio.sleep(0)
-            game.config.tick()
+            # Skip display update and use no delay for tick
+            if not display:
+                game.config.tick_no_delay()
+            else:
+                pygame.display.update()
+                await asyncio.sleep(0)
+                game.config.tick()
             episode_steps += 1
+            
+            # No sleep to maximize training speed - completely removed
         
         # Episode finished
+        # Store this episode trajectory if it's the best so far
+        agent.memory.add_trajectory(episode_trajectory, episode_reward)
+        
         agent.total_episodes += 1
         agent.episode_rewards.append(episode_reward)
+        agent.episode_scores.append(game.score.score)  # Store final score
         
         # Update exploration rate
         agent.update_exploration_rate()
@@ -361,10 +418,28 @@ async def train_dqn_agent():
         # Display progress and save model
         if agent.total_episodes % 10 == 0:
             avg_reward = sum(agent.episode_rewards[-10:]) / 10
-            print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}, Memory: {len(agent.memory)}")
-            agent.save_model()  # Save progress periodically
             
-        await asyncio.sleep(0.5)  # Small delay between episodes
+            # Display scores from last 10 episodes
+            recent_scores = agent.episode_scores[-10:]
+            scores_str = ", ".join([f"{score}" for score in recent_scores])
+            print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}")
+            print(f"Last 10 rewards: {[round(r,2) for r in agent.episode_rewards[-10:]]}")
+            print(f"Last 10 scores: [{scores_str}], Avg Score: {sum(recent_scores)/len(recent_scores):.1f}")
+            print(f"Memory size: {len(agent.memory)}")
+            print(f"Best reward so far: {agent.memory.best_reward}")
+            
+            agent.save_model()  # Save progress periodically
+        
+        # Minimal delay between episodes (but still allow some breathing room for system)
+        if not display:
+            await asyncio.sleep(0.001)
+        else:
+            await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    asyncio.run(train_dqn_agent())
+    import argparse
+    parser = argparse.ArgumentParser(description='Train Flappy Bird with DQN')
+    parser.add_argument('--display', action='store_true', help='Enable display mode')
+    args = parser.parse_args()
+    
+    asyncio.run(train_dqn_agent(display=args.display))
