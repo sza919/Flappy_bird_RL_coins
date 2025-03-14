@@ -16,15 +16,13 @@ from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerM
 class DQN(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, output_size)
+        self.fc1 = nn.Linear(input_size,128)
+        self.fc2 = nn.Linear(128, output_size)
         
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
         # No activation on output layer for unbounded Q-values
-        return self.fc3(x)
+        return self.fc2(x)
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -45,12 +43,12 @@ class DQNAgent:
         self.action_dim = 2  # [no flap, flap]
         
         # Hyperparameters
-        self.learning_rate = 0.0001
-        self.gamma = 0.99999  # Discount factor
+        self.learning_rate = 0.001
+        self.gamma = 0.99  # Discount factor
         self.epsilon = 0.1  # Exploration rate
         self.epsilon_decay = 0.995
         self.epsilon_min = 0
-        self.batch_size = 128
+        self.batch_size = 256
         self.target_update = 10  # Update target network every N episodes
         
         # Neural Networks
@@ -174,7 +172,7 @@ class DQNAgent:
         target_q_values = rewards + self.gamma * next_q_values * (1 - dones)
         
         # Compute loss
-        loss = F.smooth_l1_loss(current_q_values, target_q_values)
+        loss = F.mse_loss(current_q_values, target_q_values)
         
         # Optimize the model
         self.optimizer.zero_grad()
@@ -280,7 +278,7 @@ async def train_dqn_agent(display=False):
                     agent.memory.add(
                         agent.previous_state,
                         agent.previous_action,
-                        -100,  # Fixed negative reward for dying
+                        -10,  # Fixed negative reward for dying
                         agent.previous_state,  # Use previous state as terminal state doesn't matter
                         True  # Done flag
                     )
@@ -323,20 +321,9 @@ async def train_dqn_agent(display=False):
                 
                 # Small reward for staying alive
                 if reward == 0:
-                    reward += 0.2
-                    
-                    # Add small additional reward for good positioning
-                    if agent.previous_state is not None:
-                        pipe_y = agent.previous_state[3] * 512  # Denormalize pipe_y
-                        pipe_x = agent.previous_state[2] * 288  # Denormalize pipe_x
-                        
-                        # Encourage bird to stay at middle level of the pipe
-                        vertical_alignment = 0.2-abs(pipe_y)/512  # Higher when close to pipe center
-                        
-                        # Encourage progress toward pipe but with less weight
-                        proximity_reward = -pipe_x/288 * 0.5
-                        
-                        reward += vertical_alignment + proximity_reward
+                    reward += 0.03
+                    if should_flap:
+                        reward -= 0.3
                 
                 # Update previous score for next iteration
                 agent.previous_score = current_score
