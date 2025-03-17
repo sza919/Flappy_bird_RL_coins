@@ -254,6 +254,30 @@ async def train_dqn_agent(display=False):
     print("Starting DQN training...")
     print("Press Ctrl+C to save and exit...")
     
+    # Initialize training metrics
+    training_metrics = {
+        'episodes': 0,
+        'scores': [],
+        'coins_collected': [],  # Track coins per episode
+        'max_scores': [],
+        'rolling_mean_scores': [],
+        'best_reward': -float('inf')
+    }
+    
+    # Load existing metrics if available
+    try:
+        with open('training_metrics_simple.json', 'r') as f:
+            loaded_metrics = json.load(f)
+            # Ensure all required keys exist
+            training_metrics['episodes'] = loaded_metrics.get('episodes', 0)
+            training_metrics['scores'] = loaded_metrics.get('scores', [])
+            training_metrics['coins_collected'] = loaded_metrics.get('coins_collected', [])
+            training_metrics['max_scores'] = loaded_metrics.get('max_scores', [])
+            training_metrics['rolling_mean_scores'] = loaded_metrics.get('rolling_mean_scores', [])
+            training_metrics['best_reward'] = loaded_metrics.get('best_reward', -float('inf'))
+    except FileNotFoundError:
+        pass
+    
     if not display:
         game.config.fps = 0
         game.config.tick_no_delay = tick_no_delay.__get__(game.config, type(game.config))
@@ -281,6 +305,12 @@ async def train_dqn_agent(display=False):
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         agent.save_model()
+                        # Save final metrics
+                        training_metrics['episodes'] += 1
+                        training_metrics['scores'].append(game.score.score)
+                        training_metrics['coins_collected'].append(game.score.coins_collected)
+                        with open('training_metrics_simple.json', 'w') as f:
+                            json.dump(training_metrics, f)
                         pygame.quit()
                         return
                     elif event.type == pygame.KEYDOWN:
@@ -378,6 +408,8 @@ async def train_dqn_agent(display=False):
             agent.total_episodes += 1
             agent.episode_rewards.append(episode_reward)
             agent.episode_scores.append(game.score.score)
+            training_metrics['scores'].append(game.score.score)
+            training_metrics['coins_collected'].append(game.score.coins_collected)
             
             # Update analysis metrics
             if not agent.max_scores or game.score.score > agent.max_scores[-1]:
@@ -394,7 +426,8 @@ async def train_dqn_agent(display=False):
             if agent.total_episodes % 10 == 0:
                 training_data = {
                     "episodes": agent.total_episodes,
-                    "scores": agent.episode_scores,
+                    "scores": training_metrics['scores'],
+                    "coins_collected": training_metrics['coins_collected'],
                     "max_scores": agent.max_scores,
                     "rolling_mean_scores": agent.rolling_mean_scores,
                     "best_reward": float(agent.memory.best_reward)
@@ -414,6 +447,7 @@ async def train_dqn_agent(display=False):
                 print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}")
                 print(f"Last 10 rewards: {[round(float(r),2) for r in agent.episode_rewards[-10:]]}")
                 print(f"Last 10 scores: [{scores_str}], Avg Score: {sum(recent_scores)/len(recent_scores):.1f}")
+                print(f"Coins collected this episode: {game.score.coins_collected}")
                 print(f"Memory size: {len(agent.memory)}")
                 print(f"Best reward so far: {round(agent.memory.best_reward, 3)}")
                 print(f"Rolling mean score (100 ep): {rolling_mean:.2f}\n")
@@ -431,7 +465,8 @@ async def train_dqn_agent(display=False):
         
         training_data = {
             "episodes": agent.total_episodes,
-            "scores": agent.episode_scores,
+            "scores": training_metrics['scores'],
+            "coins_collected": training_metrics['coins_collected'],
             "max_scores": agent.max_scores,
             "rolling_mean_scores": agent.rolling_mean_scores,
             "best_reward": float(agent.memory.best_reward)

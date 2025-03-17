@@ -45,9 +45,9 @@ class DQNAgent:
         self.action_dim = 2  # [no flap, flap]
         
         # Hyperparameters
-        self.learning_rate = 0.001
-        self.gamma = 0.99  # Discount factor
-        self.epsilon = 0.1  # Exploration rate
+        self.learning_rate = 0.0001
+        self.gamma = 0.96  # Discount factor
+        self.epsilon = 0.3  # Exploration rate
         self.epsilon_decay = 0.995
         self.epsilon_min = 0
         self.batch_size = 256
@@ -58,10 +58,10 @@ class DQNAgent:
         self.target_net = DQN(self.state_dim, self.action_dim)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()  # Set target network to evaluation mode
-        self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.learning_rate)
+        self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.learning_rate, weight_decay=0.001)
         
         # Replay memory
-        self.memory = ReplayBuffer(10000)
+        self.memory = ReplayBuffer(100000)
         
         # Training stats
         self.episode_rewards = []
@@ -217,7 +217,7 @@ def tick_no_delay(self):
     """Tick without enforcing FPS limit"""
     self.clock.tick()
 
-async def train_dqn_agent(display=False):
+async def train_dqn_agent(display=False, max_episodes=None):
     if not display:
         os.environ['SDL_VIDEODRIVER'] = 'dummy'
     
@@ -228,6 +228,30 @@ async def train_dqn_agent(display=False):
     
     print("Starting DQN training...")
     print("Press Ctrl+C to save and exit...")
+    if max_episodes:
+        print(f"Training will stop after {max_episodes} episodes")
+    
+    # Initialize training metrics
+    training_metrics = {
+        'episodes': 0,
+        'scores': [],
+        'coins_collected': [],  # Track coins per episode
+        'max_scores': [],
+        'rolling_mean_scores': []
+    }
+    
+    # Load existing metrics if available
+    try:
+        with open('training_metrics.json', 'r') as f:
+            loaded_metrics = json.load(f)
+            # Ensure all required keys exist
+            training_metrics['episodes'] = loaded_metrics.get('episodes', 0)
+            training_metrics['scores'] = loaded_metrics.get('scores', [])
+            training_metrics['coins_collected'] = loaded_metrics.get('coins_collected', [])
+            training_metrics['max_scores'] = loaded_metrics.get('max_scores', [])
+            training_metrics['rolling_mean_scores'] = loaded_metrics.get('rolling_mean_scores', [])
+    except FileNotFoundError:
+        pass
     
     if not display:
         game.config.fps = 0
@@ -235,6 +259,33 @@ async def train_dqn_agent(display=False):
     
     try:
         while True:
+            # Check if we've reached the maximum episodes
+            if max_episodes and agent.total_episodes >= max_episodes:
+                print(f"\nReached maximum episodes ({max_episodes}). Saving model and data...")
+                agent.save_model()
+                training_data = {
+                    "episodes": agent.total_episodes,
+                    "scores": training_metrics['scores'],
+                    "coins_collected": training_metrics['coins_collected'],
+                    "max_scores": agent.max_scores,
+                    "rolling_mean_scores": agent.rolling_mean_scores
+                }
+                with open("training_metrics.json", "w") as f:
+                    json.dump(training_data, f, indent=4)
+                
+                # Print final stats
+                avg_reward = sum(agent.episode_rewards[-10:]) / 10
+                recent_scores = agent.episode_scores[-10:]
+                scores_str = ", ".join([f"{score}" for score in recent_scores])
+                print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}")
+                print(f"Last 10 scores: [{scores_str}], Avg Score: {sum(recent_scores)/len(recent_scores):.1f}")
+                print(f"Coins collected this episode: {training_metrics['coins_collected'][-1] if training_metrics['coins_collected'] else 0}")
+                print(f"Memory size: {len(agent.memory)}\n")
+                
+                print("Model and data saved successfully!")
+                pygame.quit()
+                return
+            
             game.background = Background(game.config)
             game.floor = Floor(game.config)
             game.player = Player(game.config)
@@ -249,12 +300,19 @@ async def train_dqn_agent(display=False):
             agent.previous_state = None
             agent.previous_action = None
             agent.previous_score = 0
+            agent.previous_coins = 0  # Reset coin counter at start of episode
             episode_steps = 0
             
             while True:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         agent.save_model()
+                        # Save final metrics
+                        training_metrics['episodes'] += 1
+                        training_metrics['scores'].append(game.score.score)
+                        training_metrics['coins_collected'].append(game.score.coins_collected)
+                        with open('training_metrics.json', 'w') as f:
+                            json.dump(training_metrics, f, indent=4)
                         pygame.quit()
                         return
                 
@@ -270,6 +328,21 @@ async def train_dqn_agent(display=False):
                             agent.previous_state,
                             True
                         )
+                    # Save episode metrics
+                    training_metrics['episodes'] += 1
+                    training_metrics['scores'].append(game.score.score) # 2
+                    training_metrics['coins_collected'].append(game.score.coins_collected)
+                    
+                    # Save metrics every 10 episodes
+                    if training_metrics['episodes'] % 10 == 0:
+                        with open('training_metrics.json', 'w') as f:
+                            json.dump(training_metrics, f, indent=4)
+                        
+                        if display:
+                            print(f"Episode {training_metrics['episodes']}")
+                            print(f"Score: {game.score.score}")
+                            print(f"Coins: {game.score.coins_collected}")
+                            print("-------------------")
                     break
                     
                 if current_state_dict:
@@ -299,12 +372,25 @@ async def train_dqn_agent(display=False):
                     
                     current_score = game.score.score
                     reward = current_score - agent.previous_score
-                    
+                    current_state = agent.normalize_state(current_state_dict)
+                    normalized_py = current_state[2]
+                    normalized_cy = current_state[4]
+                    normalized_cx = current_state[5]
                     if reward == 0:
                         reward += 0.03
+                        v_p_dist = abs(normalized_py) * 512
+                        v_c_dist = abs(normalized_cy) * 512
+                        h_c_dist = abs(normalized_cx) * 288
+                        if v_p_dist < 150:
+                            reward += 0.002
+                        if v_c_dist < 60:
+                            reward += 0.001
+                        if h_c_dist < 60:
+                            reward += 0.001
                         if should_flap:
                             reward -= 0.3
                     
+
                     agent.previous_score = current_score
                     episode_reward += reward
                     
@@ -335,6 +421,9 @@ async def train_dqn_agent(display=False):
             agent.episode_rewards.append(episode_reward)
             agent.episode_scores.append(game.score.score)
             
+            # Update training metrics (only once per episode)
+
+            
             # Update analysis metrics
             if not agent.max_scores or game.score.score > agent.max_scores[-1]:
                 agent.max_scores.append(game.score.score)
@@ -346,16 +435,24 @@ async def train_dqn_agent(display=False):
             rolling_mean = sum(window) / len(window) if window else 0
             agent.rolling_mean_scores.append(rolling_mean)
             
+            # Calculate rolling average for coins collected
+            coins_window = training_metrics['coins_collected'][-window_size:] if len(training_metrics['coins_collected']) >= window_size else training_metrics['coins_collected']
+            coins_rolling_mean = sum(coins_window) / len(coins_window) if coins_window else 0
+            training_metrics['rolling_mean_coins'] = training_metrics.get('rolling_mean_coins', [])
+            training_metrics['rolling_mean_coins'].append(coins_rolling_mean)
+            
             # Save training metrics every 10 episodes
             if agent.total_episodes % 10 == 0:
                 training_data = {
                     "episodes": agent.total_episodes,
-                    "scores": agent.episode_scores,
+                    "scores": training_metrics['scores'],
+                    "coins_collected": training_metrics['coins_collected'],
                     "max_scores": agent.max_scores,
-                    "rolling_mean_scores": agent.rolling_mean_scores
+                    "rolling_mean_scores": agent.rolling_mean_scores,
+                    "rolling_mean_coins": training_metrics['rolling_mean_coins']
                 }
                 with open("training_metrics.json", "w") as f:
-                    json.dump(training_data, f)
+                    json.dump(training_data, f, indent=4)
             
             agent.update_exploration_rate()
             
@@ -368,6 +465,8 @@ async def train_dqn_agent(display=False):
                 scores_str = ", ".join([f"{score}" for score in recent_scores])
                 print(f"Episode {agent.total_episodes}, Avg Reward: {avg_reward:.2f}, Exploration: {agent.epsilon:.4f}")
                 print(f"Last 10 scores: [{scores_str}], Avg Score: {sum(recent_scores)/len(recent_scores):.1f}")
+                print(f"Coins collected this episode: {training_metrics['coins_collected'][-1] if training_metrics['coins_collected'] else 0}")
+                print(f"Rolling avg coins (window=100): {coins_rolling_mean:.2f}")
                 print(f"Memory size: {len(agent.memory)}\n")
                 agent.save_model()
             
@@ -382,12 +481,13 @@ async def train_dqn_agent(display=False):
         
         training_data = {
             "episodes": agent.total_episodes,
-            "scores": agent.episode_scores,
+            "scores": training_metrics['scores'],
+            "coins_collected": training_metrics['coins_collected'],
             "max_scores": agent.max_scores,
             "rolling_mean_scores": agent.rolling_mean_scores
         }
-        with open("training_metrics_dqn.json", "w") as f:
-            json.dump(training_data, f)
+        with open("training_metrics.json", "w") as f:
+            json.dump(training_data, f, indent=4)
             
         print("Model and data saved successfully!")
         pygame.quit()
@@ -396,6 +496,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Train Flappy Bird with DQN and Analysis')
     parser.add_argument('--display', action='store_true', help='Enable display mode')
+    parser.add_argument('--episodes', type=int, help='Number of episodes to train')
     args = parser.parse_args()
     
-    asyncio.run(train_dqn_agent(display=args.display))
+    asyncio.run(train_dqn_agent(display=args.display, max_episodes=args.episodes))

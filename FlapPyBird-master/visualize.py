@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import argparse
 import os
+from collections import Counter
 
 def visualize_training(json_file):
     # Load the saved training data
@@ -13,27 +14,37 @@ def visualize_training(json_file):
     episodes = np.arange(len(data["scores"]))
     scores = np.array(data["scores"])
     max_scores = np.array(data["max_scores"])
-
+    print(len(data["scores"]), len(data["max_scores"]), len(data["rolling_mean_scores"]))
     # Convert rolling mean scores (some NaNs at the start)
     rolling_mean_scores = np.array(data["rolling_mean_scores"])
     rolling_mean_scores[np.isnan(rolling_mean_scores)] = 0  # Replace NaNs with 0
+    coins_collected = np.array(data["coins_collected"])
+    window_size = 100
 
+    # If you want to keep the same length as the original array, use mode='same'
+    rolling_avg_same_length = np.convolve(coins_collected, np.ones(window_size)/window_size, mode='same')
     # Plot results
     plt.figure(figsize=(12, 6))
-    plt.scatter(episodes, scores, s=1, color="blue", alpha=0.7, label="Scores per Episode")
+    plt.scatter(episodes, scores, s=1, color="blue", alpha=0.7, label="Scores at Episode")
+    plt.plot(episodes, rolling_avg_same_length, color="red", label="Coins Collected")
     plt.plot(episodes, rolling_mean_scores, color="orange", label="Rolling Mean Score", linewidth=2)
     plt.plot(episodes, max_scores, color="green", label="Max Score So Far", linewidth=2)
 
+    model_name = json_file
+    if "training_metrics_" in model_name:
+        model_name = model_name.replace("training_metrics_", "")
+    else:
+        model_name = ""
     # Log scale for better visualization
     plt.yscale("log")
     plt.xlabel("Episode")
     plt.ylabel("log(Score)")
-    plt.title("DQN Training Progress - Score Over Time (Log Scale)")
+    plt.title(f"DQN{model_name.capitalize()} Training Progress - Score Over Time (Log Scale)")
     plt.legend()
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
 
     # Create output filename based on input JSON name
-    output_base = os.path.splitext(json_file)[0]
+    output_base = "DQN" + model_name.capitalize()  + "_data" if model_name else "DQN_data"
     plt.savefig(f"{output_base}_plot.png", dpi=900, bbox_inches='tight')
     plt.close()
 
