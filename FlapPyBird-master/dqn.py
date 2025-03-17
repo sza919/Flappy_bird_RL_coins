@@ -56,7 +56,7 @@ class DQNAgent:
         self.target_net = DQN(self.state_dim, self.action_dim)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()  # Set target network to evaluation mode
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
+        self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.learning_rate)
         
         # Replay memory
         self.memory = ReplayBuffer(10000)
