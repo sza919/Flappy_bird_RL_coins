@@ -10,15 +10,15 @@ def visualize_training(json_file):
     # Load the saved training data
     with open(json_file + ".json", "r") as f:
         data = json.load(f)
-
-    episodes = np.arange(len(data["scores"]))
-    scores = np.array(data["scores"])
-    max_scores = np.array(data["max_scores"])
+    display_len = 1000
+    episodes = np.arange(len(data["scores"]))[:display_len]
+    scores = np.array(data["scores"])[:display_len]
+    max_scores = np.array(data["max_scores"])[:display_len]
     print(len(data["scores"]), len(data["max_scores"]), len(data["rolling_mean_scores"]))
     # Convert rolling mean scores (some NaNs at the start)
-    rolling_mean_scores = np.array(data["rolling_mean_scores"])
+    rolling_mean_scores = np.array(data["rolling_mean_scores"])[:display_len]
     rolling_mean_scores[np.isnan(rolling_mean_scores)] = 0  # Replace NaNs with 0
-    coins_collected = np.array(data["coins_collected"])
+    coins_collected = np.array(data["coins_collected"])[:display_len]
     window_size = 100
 
     # If you want to keep the same length as the original array, use mode='same'

@@ -13,6 +13,7 @@ import pandas as pd
 from src.flappy import Flappy
 from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerMode
 
+
 os.environ['SDL_AUDIODRIVER'] = 'dummy'
 
 # Neural network architecture for DQN
@@ -46,8 +47,8 @@ class DQNAgent:
         
         # Hyperparameters
         self.learning_rate = 0.0001
-        self.gamma = 0.96  # Discount factor
-        self.epsilon = 0.3  # Exploration rate
+        self.gamma = 0.99  # Discount factor
+        self.epsilon = 0.1  # Exploration rate
         self.epsilon_decay = 0.995
         self.epsilon_min = 0
         self.batch_size = 256
@@ -182,6 +183,18 @@ class DQNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
     
     def save_model(self):
+        """Save the model and replay buffer"""
+        # Convert numpy arrays to lists in the replay buffer
+        memory_list = []
+        for state, action, reward, next_state, done in self.memory.buffer:
+            memory_list.append((
+                state.tolist() if isinstance(state, np.ndarray) else state,
+                action,
+                reward,
+                next_state.tolist() if isinstance(next_state, np.ndarray) else next_state,
+                done
+            ))
+        
         model_state = {
             'policy_net': self.policy_net.state_dict(),
             'target_net': self.target_net.state_dict(),
@@ -191,11 +204,14 @@ class DQNAgent:
             'scores': self.episode_scores,
             'epsilon': float(self.epsilon),
             'max_scores': self.max_scores,
-            'rolling_mean_scores': self.rolling_mean_scores
+            'rolling_mean_scores': self.rolling_mean_scores,
+            'memory': memory_list
         }
         torch.save(model_state, 'dqn_model.pth')
+        #print("Model and replay buffer saved successfully!")
         
     def load_model(self):
+        """Load the model and replay buffer"""
         try:
             checkpoint = torch.load('dqn_model.pth', weights_only=True)
             self.policy_net.load_state_dict(checkpoint['policy_net'])
@@ -207,7 +223,18 @@ class DQNAgent:
             self.epsilon = checkpoint['epsilon']
             self.max_scores = checkpoint.get('max_scores', [])
             self.rolling_mean_scores = checkpoint.get('rolling_mean_scores', [])
-            print(f"Loaded DQN model after {self.total_episodes} episodes")
+            self.memory = ReplayBuffer(100000)
+            for state, action, reward, next_state, done in checkpoint['memory']:
+                self.memory.add(
+                    np.array(state, dtype=np.float32),
+                    action,
+                    reward,
+                    np.array(next_state, dtype=np.float32),
+                    done
+                )
+            
+            print(f"Model and replay buffer loaded successfully! Current episodes: {self.total_episodes}")
+            print(f"Current memory size: {len(self.memory)}")
             return True
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             print("No valid DQN model found, starting fresh")

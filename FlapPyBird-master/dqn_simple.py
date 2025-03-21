@@ -16,6 +16,7 @@ from src.entities import Background, Floor, Player, Pipes, Score, Coins, PlayerM
 # Disable sound
 os.environ['SDL_AUDIODRIVER'] = 'dummy'
 
+
 # Neural network architecture for DQN
 class DQN(nn.Module):
     def __init__(self, input_size, output_size):
@@ -207,18 +208,43 @@ class DQNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
     
     def save_model(self):
+        """Save the model and replay buffer"""
+        # Convert numpy arrays to lists in the replay buffer
+        memory_list = []
+        for state, action, reward, next_state, done in self.memory.buffer:
+            memory_list.append((
+                state.tolist() if isinstance(state, np.ndarray) else float(state),
+                int(action),
+                float(reward),
+                next_state.tolist() if isinstance(next_state, np.ndarray) else float(next_state),
+                bool(done)
+            ))
+
+        best_trajectory = []
+        for state, action, reward, next_state, done in self.memory.best_trajectory:
+            best_trajectory.append((
+                state.tolist() if isinstance(state, np.ndarray) else float(state),
+                int(action),
+                float(reward),
+                next_state.tolist() if isinstance(next_state, np.ndarray) else float(next_state),
+                bool(done)
+            ))    
         model_state = {
             'policy_net': self.policy_net.state_dict(),
             'target_net': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
-            'episodes': self.total_episodes,
+            'episodes': int(self.total_episodes),
             'rewards': [float(r) for r in self.episode_rewards],
-            'scores': self.episode_scores,
+            'scores': [int(s) for s in self.episode_scores],
             'epsilon': float(self.epsilon),
-            'max_scores': self.max_scores,
-            'rolling_mean_scores': self.rolling_mean_scores
+            'max_scores': [int(s) for s in self.max_scores],
+            'rolling_mean_scores': [float(s) for s in self.rolling_mean_scores],
+            'memory': memory_list,
+            'best_trajectory': best_trajectory,
+            'best_reward': float(self.memory.best_reward)
         }
         torch.save(model_state, 'dqn_model_simple.pth')
+        print("Model and replay buffer saved successfully!")
         
     def load_model(self):
         try:
@@ -232,58 +258,62 @@ class DQNAgent:
             self.epsilon = checkpoint['epsilon']
             self.max_scores = checkpoint.get('max_scores', [])
             self.rolling_mean_scores = checkpoint.get('rolling_mean_scores', [])
-            print(f"Loaded DQN model after {self.total_episodes} episodes")
+            
+            # Reset and restore replay buffer
+            self.memory = ReplayBuffer(10000)
+            if 'memory' in checkpoint:
+                for state, action, reward, next_state, done in checkpoint['memory']:
+                    self.memory.add(
+                        np.array(state, dtype=np.float32),
+                        action,
+                        reward,
+                        np.array(next_state, dtype=np.float32),
+                        done
+                    )
+            
+            print(f"Model and replay buffer loaded successfully! Current episodes: {self.total_episodes}")
+            print(f"Current memory size: {len(self.memory)}")
             return True
         except (FileNotFoundError, ValueError, RuntimeError) as e:
             print("No valid DQN model found, starting fresh")
             return False
 
+
+
+
+
 def tick_no_delay(self):
     """Tick without enforcing FPS limit"""
     self.clock.tick()
 
-async def train_dqn_agent(display=False):
+async def train_dqn_agent(display=False, max_episodes=None):
     if not display:
         os.environ['SDL_VIDEODRIVER'] = 'dummy'
     
+    # Initialize game and agent
     game = Flappy(headless=not display)
     agent = DQNAgent()
-    agent.display = display
-    agent.load_model()
-    
-    print("Starting DQN training...")
-    print("Press Ctrl+C to save and exit...")
+    agent.load_model()  # Try to load existing model
     
     # Initialize training metrics
     training_metrics = {
-        'episodes': 0,
+        'episodes': [],
         'scores': [],
-        'coins_collected': [],  # Track coins per episode
+        'coins_collected': [],
         'max_scores': [],
-        'rolling_mean_scores': [],
-        'best_reward': -float('inf')
+        'rolling_mean_scores': []
     }
-    
-    # Load existing metrics if available
-    try:
-        with open('training_metrics_simple.json', 'r') as f:
-            loaded_metrics = json.load(f)
-            # Ensure all required keys exist
-            training_metrics['episodes'] = loaded_metrics.get('episodes', 0)
-            training_metrics['scores'] = loaded_metrics.get('scores', [])
-            training_metrics['coins_collected'] = loaded_metrics.get('coins_collected', [])
-            training_metrics['max_scores'] = loaded_metrics.get('max_scores', [])
-            training_metrics['rolling_mean_scores'] = loaded_metrics.get('rolling_mean_scores', [])
-            training_metrics['best_reward'] = loaded_metrics.get('best_reward', -float('inf'))
-    except FileNotFoundError:
-        pass
-    
+
     if not display:
         game.config.fps = 0
         game.config.tick_no_delay = tick_no_delay.__get__(game.config, type(game.config))
-    
     try:
         while True:
+            # Check if we've reached the maximum number of episodes
+            if max_episodes and agent.total_episodes >= max_episodes:
+                print(f"\nReached {max_episodes} episodes, stopping training.")
+                break
+                
             game.background = Background(game.config)
             game.floor = Floor(game.config)
             game.player = Player(game.config)
@@ -306,9 +336,11 @@ async def train_dqn_agent(display=False):
                     if event.type == pygame.QUIT:
                         agent.save_model()
                         # Save final metrics
-                        training_metrics['episodes'] += 1
+                        training_metrics['episodes'].append(agent.total_episodes)
                         training_metrics['scores'].append(game.score.score)
                         training_metrics['coins_collected'].append(game.score.coins_collected)
+                        training_metrics['max_scores'].append(max(training_metrics['max_scores'], [game.score.score]))
+                        training_metrics['rolling_mean_scores'].append(sum(training_metrics['rolling_mean_scores'][-100:]) / len(training_metrics['rolling_mean_scores'][-100:]))
                         with open('training_metrics_simple.json', 'w') as f:
                             json.dump(training_metrics, f)
                         pygame.quit()
@@ -452,7 +484,6 @@ async def train_dqn_agent(display=False):
                 print(f"Best reward so far: {round(agent.memory.best_reward, 3)}")
                 print(f"Rolling mean score (100 ep): {rolling_mean:.2f}\n")
                 
-                agent.save_model()
             
             if not display:
                 await asyncio.sleep(0.001)
@@ -479,8 +510,9 @@ async def train_dqn_agent(display=False):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='Train Flappy Bird with DQN and Analysis')
-    parser.add_argument('--display', action='store_true', help='Enable display mode')
+    parser = argparse.ArgumentParser(description='Train DQN agent for Flappy Bird')
+    parser.add_argument('--display', action='store_true', help='Display the game window')
+    parser.add_argument('--episodes', type=int, default=None, help='Number of episodes to train')
     args = parser.parse_args()
     
-    asyncio.run(train_dqn_agent(display=args.display)) 
+    asyncio.run(train_dqn_agent(display=args.display, max_episodes=args.episodes)) 
