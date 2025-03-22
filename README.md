@@ -15,4 +15,4 @@ Run python visualize.py YOUR_DATA_FILE_NAME to get the data plot
 
 Run python play_dqn.py --name YOUR_DATA_FILE_NAME to play the game for 300 episodes
 
-When try to load model, due to the python environment you may need to put or remove weights_only = True from torch.load()
+When try to load model, due to the python environment you may need to put or remove weights_only = True in torch.load()
